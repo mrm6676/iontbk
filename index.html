@@ -1,0 +1,551 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { 
+  BookOpen, 
+  Sun, 
+  Moon, 
+  Plus, 
+  Trash2, 
+  Key, 
+  Send, 
+  Sparkles, 
+  Upload, 
+  FileText, 
+  Copy, 
+  Info,
+  Menu,
+  BookMarked,
+  Search,
+  Volume2,
+  VolumeX,
+  Layers,
+  HelpCircle,
+  Maximize2,
+  Minimize2,
+  AlertCircle,
+  HelpCircle as CheckCircle
+} from 'lucide-react';
+
+// Vercel deployment production-grade configuration
+const PDF_JS_VERSION = '3.11.174';
+const PDF_JS_LIB_URL = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDF_JS_VERSION}/pdf.min.js`;
+const PDF_JS_WORKER_URL = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${PDF_JS_VERSION}/pdf.worker.min.js`;
+
+export default function App() {
+  // Theme & Layout State
+  const [darkMode, setDarkMode] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  
+  // API Key & Connection State
+  const [apiKey, setApiKey] = useState('');
+  const [apiStatus, setApiStatus] = useState('idle'); // 'idle' | 'checking' | 'connected' | 'error'
+  const [apiError, setApiError] = useState('');
+  
+  // App Modes: 'chat' | 'study' | 'boards'
+  const [activeTab, setActiveTab] = useState('chat');
+  const [chatMode, setChatMode] = useState('doc'); // 'doc' (file context) | 'general' (global assistant)
+  const [persona, setPersona] = useState('scholar'); // 'scholar' | 'tutor' | 'analyst' | 'creative'
+  const [searchGrounding, setSearchGrounding] = useState(false);
+  const [isReadingAudio, setIsReadingAudio] = useState(false);
+  const [currentAudio, setCurrentAudio] = useState(null);
+  
+  // Structured Study guides state
+  const [studyCards, setStudyCards] = useState([]);
+  const [isGeneratingStudy, setIsGeneratingStudy] = useState(false);
+  const [selectedCardIdx, setSelectedCardIdx] = useState(0);
+  const [isCardFlipped, setIsCardFlipped] = useState(false);
+  
+  // Boards/Visual Studio state
+  const [boardPrompt, setBoardPrompt] = useState('');
+  const [generatedVisuals, setGeneratedVisuals] = useState([]);
+  const [isGeneratingVisual, setIsGeneratingVisual] = useState(false);
+
+  // Notifications State
+  const [notifications, setNotifications] = useState([]);
+
+  // Documents State
+  const [documents, setDocuments] = useState([]);
+  const [selectedDocId, setSelectedDocId] = useState('welcome-doc');
+  const [pdfLibReady, setPdfLibReady] = useState(false);
+  const [isExtracting, setIsExtracting] = useState(false);
+
+  // Chat State
+  const [chats, setChats] = useState({});
+  const [generalChats, setGeneralChats] = useState([
+    { sender: 'assistant', text: 'Hello! I am your global Gemini assistant. Ask me anything, or toggle over to File-bound mode to interrogate your uploaded notebooks.', timestamp: new Date().toISOString() }
+  ]);
+  
+  const [promptInput, setPromptInput] = useState('');
+  const [isGenerating, setIsGenerating] = useState(false);
+  
+  const chatEndRef = useRef(null);
+  const fileInputRef = useRef(null);
+
+  // Initial client side mounts for production reliability
+  useEffect(() => {
+    // Read LocalStorage strictly client side to protect Vercel Serverless pre-rendering checks
+    if (typeof window !== 'undefined') {
+      const savedKey = localStorage.getItem('io_notebook_gemini_key') || '';
+      if (savedKey) {
+        setApiKey(savedKey);
+        validateApiKey(savedKey);
+      }
+
+      const savedDocs = localStorage.getItem('io_notebook_documents');
+      if (savedDocs) {
+        try {
+          const parsed = JSON.parse(savedDocs);
+          setDocuments(parsed);
+          if (parsed.length > 0) setSelectedDocId(parsed[0].id);
+        } catch(e) { setupDefaultDoc(); }
+      } else {
+        setupDefaultDoc();
+      }
+
+      const savedChats = localStorage.getItem('io_notebook_chats');
+      if (savedChats) {
+        try { setChats(JSON.parse(savedChats)); } catch(e) { setChats({}); }
+      }
+    }
+
+    // Lazy load script explicitly to satisfy Vercel Optimization rules
+    if (window.pdfjsLib) {
+      setPdfLibReady(true);
+    } else {
+      const script = document.createElement('script');
+      script.src = PDF_JS_LIB_URL;
+      script.async = true;
+      script.onload = () => {
+        if (window.pdfjsLib) {
+          window.pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_JS_WORKER_URL;
+          setPdfLibReady(true);
+        }
+      };
+      document.head.appendChild(script);
+    }
+  }, []);
+
+  const setupDefaultDoc = () => {
+    const welcome = {
+      id: 'welcome-doc',
+      name: 'Welcome to IO Notebook.txt',
+      type: 'text/plain',
+      content: `Welcome to IO Notebook — a premium, minimalist environment optimized for lightning-fast deployment on Vercel.\n\nHere, your ideas and documents flow in absolute focus.`,
+      addedAt: new Date().toISOString()
+    };
+    setDocuments([welcome]);
+    setSelectedDocId('welcome-doc');
+    setChats({
+      'welcome-doc': [{ sender: 'assistant', text: 'Welcome to your document console! How can I analyze this text for you?', timestamp: new Date().toISOString() }]
+    });
+  };
+
+  // Sync to local storage
+  useEffect(() => {
+    if (documents.length > 0) {
+      localStorage.setItem('io_notebook_documents', JSON.stringify(documents));
+    }
+  }, [documents]);
+
+  useEffect(() => {
+    localStorage.setItem('io_notebook_chats', JSON.stringify(chats));
+  }, [chats]);
+
+  // Toast System
+  const showToast = (message, type = 'info') => {
+    const id = Date.now();
+    setNotifications(prev => [...prev, { id, message, type }]);
+    setTimeout(() => {
+      setNotifications(prev => prev.filter(n => n.id !== id));
+    }, 4000);
+  };
+
+  const validateApiKey = async (keyToValidate) => {
+    if (!keyToValidate) return;
+    setApiStatus('checking');
+    try {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models?key=${keyToValidate}`);
+      if (res.ok) {
+        setApiStatus('connected');
+        localStorage.setItem('io_notebook_gemini_key', keyToValidate);
+      } else {
+        setApiStatus('error');
+      }
+    } catch (err) {
+      setApiStatus('error');
+    }
+  };
+
+  const handleApiKeyChange = (e) => {
+    const key = e.target.value.trim();
+    setApiKey(key);
+    if (!key) {
+      setApiStatus('idle');
+      localStorage.removeItem('io_notebook_gemini_key');
+    }
+  };
+
+  const processUploadedFile = async (file) => {
+    if (!file) return;
+    setIsExtracting(true);
+    const fileId = 'doc_' + Date.now();
+    const newDoc = { id: fileId, name: file.name, type: file.type, addedAt: new Date().toISOString(), content: '' };
+
+    try {
+      if (file.type === 'text/plain' || file.name.endsWith('.txt') || file.name.endsWith('.md')) {
+        const text = await file.text();
+        newDoc.content = text;
+        finalizeDocUpload(newDoc);
+      } else if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
+        if (!pdfLibReady || !window.pdfjsLib) {
+          throw new Error('PDF reader engine warming up. Try again in 2 seconds.');
+        }
+        const arrayBuffer = await file.arrayBuffer();
+        const loadingTask = window.pdfjsLib.getDocument({ data: arrayBuffer });
+        const pdf = await loadingTask.promise;
+        let txt = '';
+        for (let i = 1; i <= Math.min(pdf.numPages, 30); i++) {
+          const page = await pdf.getPage(i);
+          const content = await page.getTextContent();
+          txt += content.items.map(item => item.str).join(' ') + '\n';
+        }
+        newDoc.content = txt.trim() || 'No clear readable text elements located.';
+        finalizeDocUpload(newDoc);
+      } else {
+        throw new Error('Unsupported format. Feed plain text or PDF.');
+      }
+    } catch (e) {
+      showToast(e.message, 'error');
+    } finally {
+      setIsExtracting(false);
+    }
+  };
+
+  const finalizeDocUpload = (doc) => {
+    setDocuments(prev => [doc, ...prev]);
+    setSelectedDocId(doc.id);
+    setChats(prev => ({
+      ...prev,
+      [doc.id]: [{ sender: 'assistant', text: `Loaded "${doc.name}" context cleanly. Ask me anything.`, timestamp: new Date().toISOString() }]
+    }));
+    showToast(`Successfully indexed ${doc.name}`, 'success');
+  };
+
+  const currentDoc = documents.find(d => d.id === selectedDocId) || null;
+  const activeChats = chatMode === 'doc' ? (chats[selectedDocId] || []) : generalChats;
+
+  const handleSendMessage = async (e) => {
+    e.preventDefault();
+    if (!promptInput.trim() || isGenerating || apiStatus !== 'connected') return;
+
+    const query = promptInput;
+    setPromptInput('');
+
+    const newMsg = { sender: 'user', text: query, timestamp: new Date().toISOString() };
+    if (chatMode === 'doc') {
+      setChats(prev => ({ ...prev, [selectedDocId]: [...(prev[selectedDocId] || []), newMsg] }));
+    } else {
+      setGeneralChats(prev => [...prev, newMsg]);
+    }
+
+    setIsGenerating(true);
+    try {
+      const model = searchGrounding ? 'gemini-3-flash-preview' : 'gemini-2.5-flash-preview-09-2025';
+      let endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      
+      const systemInstruction = `You are an elite, minimal chatbot built into an IO Notebook. Current mode: ${chatMode}. Selected Persona: ${persona}. Write answers cleanly with elegant markup lines.`;
+      
+      const contextText = chatMode === 'doc' && currentDoc ? `[DOCUMENT CONTEXT]\n${currentDoc.content}\n[END CONTEXT]\n\n` : '';
+      
+      const payload = {
+        contents: [{ parts: [{ text: `${contextText}Query: ${query}` }] }],
+        systemInstruction: { parts: [{ text: systemInstruction }] }
+      };
+
+      if (searchGrounding) {
+        payload.tools = [{ googleSearch: {} }];
+      }
+
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+
+      if (!res.ok) throw new Error('Gemini API returned an update validation issue.');
+      const data = await res.json();
+      
+      let replyText = data.candidates?.[0]?.content?.parts?.[0]?.text || 'No response compiled.';
+      let groundingMetadata = data.candidates?.[0]?.groundingMetadata || null;
+
+      const botMsg = { 
+        sender: 'assistant', 
+        text: replyText, 
+        timestamp: new Date().toISOString(),
+        grounding: groundingMetadata
+      };
+
+      if (chatMode === 'doc') {
+        setChats(prev => ({ ...prev, [selectedDocId]: [...(prev[selectedDocId] || []), botMsg] }));
+      } else {
+        setGeneralChats(prev => [...prev, botMsg]);
+      }
+    } catch(err) {
+      showToast(err.message, 'error');
+    } finally {
+      setIsGenerating(false);
+    }
+  };
+
+  const clearCurrentChat = () => {
+    if (chatMode === 'doc') {
+      setChats(prev => ({ ...prev, [selectedDocId]: [] }));
+    } else {
+      setGeneralChats([]);
+    }
+    showToast('Conversation stream cleared', 'info');
+  };
+
+  return (
+    <div className={`min-h-screen font-sans transition-colors duration-200 selection:bg-emerald-500/20 ${darkMode ? 'bg-[#0A0B0D] text-neutral-100' : 'bg-[#FAFAF9] text-stone-800'}`}>
+      
+      {/* Toast Bar */}
+      <div className="fixed bottom-5 right-5 z-[100] space-y-2">
+        {notifications.map(n => (
+          <div key={n.id} className={`p-3 rounded-xl shadow-lg border text-xs flex items-center space-x-2 animate-fade-in min-w-[240px] ${
+            darkMode ? 'bg-neutral-900 border-neutral-800 text-neutral-200' : 'bg-white border-stone-200 text-stone-800'
+          }`}>
+            <span className={`w-1.5 h-1.5 rounded-full ${n.type === 'error' ? 'bg-red-500' : 'bg-emerald-400'}`} />
+            <p>{n.message}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* Production Premium Header */}
+      <header className={`sticky top-0 z-40 px-6 py-3.5 flex flex-wrap gap-4 items-center justify-between border-b ${darkMode ? 'bg-[#0A0B0D]/90 border-neutral-900' : 'bg-[#FAFAF9]/90 border-stone-200'} backdrop-blur-md`}>
+        <div className="flex items-center space-x-3">
+          <button onClick={() => setSidebarOpen(!sidebarOpen)} className="p-2 rounded-lg hover:bg-neutral-800/50 text-neutral-400">
+            <Menu size={18} />
+          </button>
+          <div className="flex items-center space-x-2">
+            <div className={`w-2 h-2 rounded-full transition-all duration-500 ${apiStatus === 'connected' ? 'bg-emerald-400 shadow-[0_0_10px_#10b981]' : 'bg-neutral-600'}`} />
+            <span className="font-semibold text-xs tracking-widest uppercase">IO NOTEBOOK</span>
+          </div>
+        </div>
+
+        {/* API Control Center */}
+        <div className="flex items-center space-x-3 w-full sm:w-auto">
+          <div className="relative w-64">
+            <Key size={12} className="absolute left-3 top-2.5 text-neutral-500" />
+            <input
+              type="password"
+              placeholder="Gemini API Token Key..."
+              value={apiKey}
+              onChange={handleApiKeyChange}
+              onBlur={() => validateApiKey(apiKey)}
+              className={`w-full pl-8 pr-16 py-1.5 text-xs rounded-xl border transition-all outline-none ${
+                darkMode ? 'bg-neutral-900 border-neutral-800 text-neutral-200 focus:border-neutral-700' : 'bg-white border-stone-200'
+              }`}
+            />
+            <span className="absolute right-3 top-2 text-[9px] font-mono uppercase text-neutral-500">
+              {apiStatus === 'connected' ? 'LIVE' : apiStatus}
+            </span>
+          </div>
+
+          <button onClick={() => setDarkMode(!darkMode)} className="p-2 rounded-xl bg-neutral-900/50 border border-neutral-800 text-neutral-400 hover:text-white">
+            {darkMode ? <Sun size={14} /> : <Moon size={14} />}
+          </button>
+        </div>
+      </header>
+
+      <div className="flex min-h-[calc(100vh-65px)]">
+        {/* Sidebar shelf */}
+        <aside className={`transition-all duration-300 border-r overflow-hidden flex flex-col shrink-0 ${sidebarOpen ? 'w-72' : 'w-0 border-r-0'} ${darkMode ? 'bg-[#0C0D0F] border-neutral-900' : 'bg-[#F5F5F4] border-stone-200'}`}>
+          <div className="p-4 flex-1 flex flex-col min-w-[288px]">
+            <div 
+              onClick={() => fileInputRef.current?.click()}
+              className={`border border-dashed rounded-xl p-4 text-center cursor-pointer mb-6 transition-colors ${
+                darkMode ? 'border-neutral-800 hover:bg-neutral-900/40 text-neutral-400' : 'border-stone-300 hover:bg-stone-100 text-stone-600'
+              }`}
+            >
+              <Upload size={18} className="mx-auto mb-2" />
+              <span className="text-xs font-medium block">Add PDF / Plain Text Document</span>
+              <input ref={fileInputRef} type="file" onChange={(e) => processUploadedFile(e.target.files[0])} className="hidden" accept=".pdf,.txt,.md" />
+            </div>
+
+            <div className="text-[10px] uppercase font-bold tracking-wider text-neutral-500 mb-2 px-1">Indexed Sub-Files</div>
+            
+            <div className="flex-1 overflow-y-auto space-y-1">
+              {documents.map((doc) => {
+                const active = doc.id === selectedDocId;
+                return (
+                  <div
+                    key={doc.id}
+                    onClick={() => setSelectedDocId(doc.id)}
+                    className={`relative p-3 rounded-xl border flex items-center justify-between cursor-pointer transition-all group ${
+                      active 
+                        ? (darkMode ? 'bg-neutral-900 border-neutral-800 text-white shadow-[0_4px_12px_rgba(0,0,0,0.5)]' : 'bg-white border-stone-300 text-stone-900 shadow-sm')
+                        : (darkMode ? 'bg-transparent border-transparent text-neutral-400 hover:bg-neutral-900/30' : 'bg-transparent border-transparent text-stone-600 hover:bg-stone-200/50')
+                    }`}
+                  >
+                    {active && <div className="absolute left-0 top-3 bottom-3 w-1 bg-emerald-400 rounded-r" />}
+                    <div className="flex items-center space-x-2.5 min-w-0 pl-1.5">
+                      <FileText size={14} className={active ? 'text-emerald-400' : 'text-neutral-500'} />
+                      <div className="truncate text-xs font-medium">{doc.name}</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </aside>
+
+        {/* Center Sandbox & Chat Studio */}
+        <main className="flex-1 flex flex-col lg:flex-row overflow-hidden">
+          {/* Document Canvas Frame */}
+          <section className="flex-1 p-6 flex flex-col border-b lg:border-b-0 lg:border-r border-neutral-900">
+            {currentDoc ? (
+              <div className="flex flex-col h-full">
+                {/* HIGH VISIBILITY FILE METADATA CONNECTOR CARD */}
+                <div className={`p-4 rounded-xl mb-4 border flex items-center justify-between shadow-sm transition-all ${
+                  darkMode ? 'bg-neutral-900/50 border-neutral-800 text-white' : 'bg-white border-stone-200 text-stone-900'
+                }`}>
+                  <div className="flex items-center space-x-3 min-w-0">
+                    <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400 shrink-0">
+                      <FileText size={18} />
+                    </div>
+                    <div className="min-w-0">
+                      <h2 className="text-sm font-semibold truncate leading-none mb-1">{currentDoc.name}</h2>
+                      <p className="text-[10px] text-neutral-500 uppercase font-mono tracking-tight">Active Context Vector • {(currentDoc.content.length / 1024).toFixed(1)} KB</p>
+                    </div>
+                  </div>
+                  <button 
+                    onClick={() => { navigator.clipboard.writeText(currentDoc.content); showToast('Text copied to clipboard', 'success'); }}
+                    className="p-2 rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-neutral-200"
+                  >
+                    <Copy size={14} />
+                  </button>
+                </div>
+
+                {/* Central Canvas Frame Body */}
+                <div className={`flex-1 p-5 rounded-xl font-mono text-xs leading-relaxed overflow-y-auto whitespace-pre-wrap select-text ${
+                  darkMode ? 'bg-[#0E0F12] text-neutral-300 border border-neutral-900' : 'bg-white text-stone-700 border border-stone-200'
+                }`}>
+                  {isExtracting ? (
+                    <div className="h-full flex items-center justify-center text-neutral-500 animate-pulse">Decompiling context matrix bytes...</div>
+                  ) : currentDoc.content}
+                </div>
+              </div>
+            ) : (
+              <div className="h-full flex flex-col items-center justify-center text-neutral-500 text-xs">
+                <BookOpen size={32} className="mb-2 text-neutral-600" />
+                Select a sub-file document context from the shelf container.
+              </div>
+            )}
+          </section>
+
+          {/* Versatile Chatbot Panel */}
+          <section className={`w-full lg:w-[440px] shrink-0 p-6 flex flex-col ${darkMode ? 'bg-[#0C0D0F]' : 'bg-[#F5F5F4]'}`}>
+            {/* Mode Controls */}
+            <div className="flex items-center justify-between pb-3 mb-4 border-b border-neutral-800">
+              <div className="flex space-x-2">
+                <button 
+                  onClick={() => setChatMode('doc')} 
+                  className={`text-xs px-2.5 py-1 rounded-lg border transition-all ${
+                    chatMode === 'doc' ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' : 'border-transparent text-neutral-500'
+                  }`}
+                >
+                  📄 File Context
+                </button>
+                <button 
+                  onClick={() => setChatMode('general')} 
+                  className={`text-xs px-2.5 py-1 rounded-lg border transition-all ${
+                    chatMode === 'general' ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-400' : 'border-transparent text-neutral-500'
+                  }`}
+                >
+                  🌐 Global Chat
+                </button>
+              </div>
+
+              <div className="flex items-center space-x-2">
+                <button 
+                  onClick={() => setSearchGrounding(!searchGrounding)} 
+                  className={`p-1.5 rounded-lg border transition-all ${
+                    searchGrounding ? 'bg-sky-500/10 border-sky-500/30 text-sky-400' : 'border-neutral-800 text-neutral-500'
+                  }`}
+                  title="Toggle Search Grounding"
+                >
+                  <Search size={13} />
+                </button>
+                <button onClick={clearCurrentChat} className="p-1.5 rounded-lg border border-neutral-800 text-neutral-500 hover:text-red-400" title="Clear Thread">
+                  <Trash2 size={13} />
+                </button>
+              </div>
+            </div>
+
+            {/* Response Area Streams */}
+            <div className="flex-1 overflow-y-auto space-y-4 pr-1 mb-4">
+              {activeChats.map((chat, idx) => (
+                <div key={idx} className={`flex flex-col ${chat.sender === 'user' ? 'items-end' : 'items-start'}`}>
+                  <div className="text-[10px] uppercase font-mono tracking-wider text-neutral-500 mb-1">
+                    {chat.sender === 'user' ? 'You' : 'Gemini Core'}
+                  </div>
+                  <div className={`p-3 rounded-xl text-xs whitespace-pre-wrap max-w-[90%] leading-relaxed ${
+                    chat.sender === 'user'
+                      ? (darkMode ? 'bg-neutral-900 text-neutral-100 border border-neutral-800' : 'bg-stone-200 text-stone-900')
+                      : (darkMode ? 'bg-neutral-950 text-neutral-200 border border-neutral-900' : 'bg-white text-stone-800 border border-stone-200')
+                  }`}>
+                    {chat.text}
+
+                    {/* Grounding Attribution Reference Chips */}
+                    {chat.grounding?.groundingChunks && (
+                      <div className="mt-3 pt-2 border-t border-neutral-800 space-y-1">
+                        <div className="text-[9px] font-mono text-neutral-500 uppercase tracking-wide">Web Sources:</div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {chat.grounding.groundingChunks.map((chunk, cIdx) => chunk.web?.uri && (
+                            <a 
+                              key={cIdx} 
+                              href={chunk.web.uri} 
+                              target="_blank" 
+                              rel="noreferrer"
+                              className="text-[10px] px-2 py-0.5 rounded bg-sky-500/10 border border-sky-500/20 text-sky-400 hover:bg-sky-500/20 transition-colors inline-flex items-center"
+                            >
+                              {chunk.web.title || 'Source'}
+                            </a>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))}
+              {isGenerating && (
+                <div className="text-[10px] font-mono text-neutral-500 animate-pulse">Compiling model token vectors...</div>
+              )}
+            </div>
+
+            {/* Input Submission Console Bar */}
+            <form onSubmit={handleSendMessage} className="relative mt-auto">
+              <input
+                type="text"
+                placeholder={chatMode === 'doc' ? 'Query this document content...' : 'Ask global companion anything...'}
+                value={promptInput}
+                onChange={(e) => setPromptInput(e.target.value)}
+                disabled={apiStatus !== 'connected' || isGenerating}
+                className={`w-full p-3 pr-12 text-xs rounded-xl border outline-none ${
+                  darkMode ? 'bg-neutral-950 border-neutral-900 text-neutral-100 focus:border-neutral-800' : 'bg-white border-stone-200 text-stone-900'
+                }`}
+              />
+              <button 
+                type="submit" 
+                disabled={!promptInput.trim() || isGenerating || apiStatus !== 'connected'}
+                className="absolute right-2 top-2 p-1.5 rounded-lg bg-emerald-500 text-white disabled:opacity-40"
+              >
+                <Send size={12} />
+              </button>
+            </form>
+          </section>
+        </main>
+      </div>
+    </div>
+  );
+}
